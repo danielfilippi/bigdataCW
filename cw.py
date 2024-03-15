@@ -59,6 +59,15 @@ rawData.replace('?', np.nan, inplace=True)
 #threshold for dropping cols
 threshold = len(rawData) / 2
 
+##More feature engineering: Count the number of diabetes medications a patient is on. This could indicate the severity of their diabetes management.
+medications = ['metformin', 'repaglinide','nateglinide', 'chlorpropamide', 'glimepiride','acetohexamide', 'glipizide', 'glyburide','tolbutamide', 'pioglitazone', 'rosiglitazone', 'acarbose','miglitol','troglitazone','tolazamide','examide','citoglipton','insulin','glyburide-metformin', 'glipizide-metformin', 'glimepiride-pioglitazone','metformin-rosiglitazone', 'metformin-pioglitazone']
+rawData['diabetes_medication_count'] = rawData[medications].apply(lambda x: x != 'No').sum(axis=1)
+#Count the number of increases/decreases and steadies
+rawData['medications_increased'] = rawData[medications].apply(lambda x: (x == 'Up').sum(), axis=1)
+rawData['medications_decreased'] = rawData[medications].apply(lambda x: (x == 'Down').sum(), axis=1)
+#rawData['medications_held'] = rawData[medications].apply(lambda x: (x == 'Steady').sum(), axis=1)
+rawData['total_medication_changes'] = rawData['medications_increased'] + rawData['medications_decreased']
+
 
 #drop cols where >50% of data is ?
 rawData.dropna(axis=1, thresh=threshold, inplace=True)
@@ -81,10 +90,40 @@ def get_middle_age(age_range):
 rawData['age'] = rawData['age'].apply(get_middle_age)
 #print(rawData.head())
 
+# def map_age_to_group(age):  #HAS A BIG EFFECT ON THE MODEL - REDUCES PREC INCREASES REC
+#     if age < 18:
+#         return 'Pediatric'
+#     elif age < 65:
+#         return 'Adult'
+#     else:
+#         return 'Senior'
+# rawData['age_group'] = rawData['age'].apply(map_age_to_group)
+
+
+def assign_privilege(row):
+    age_privileged = 1 if 25 <= row['age'] < 65 else 0
+    gender_privileged = 1 if row['gender'] == 'Male' else 0
+    race_privileged = 1 if row['race'] != 'AfricanAmerican' else 0
+    
+    # A person is considered 'privileged' if they meet all the criteria for being non-marginalized according to the given definitions
+    return 0 if age_privileged and gender_privileged and race_privileged else 1
+
+rawData['marginalised'] = rawData.apply(assign_privilege, axis=1)
+
+
 
 #avoid data leakage by just keeping one
 rawData = rawData.drop_duplicates(subset='patient_nbr', keep='first')
 
+#hm
+#rawData['medical_burden'] = rawData['num_lab_procedures'] + rawData['num_procedures'] + rawData['num_medications'] + rawData['number_inpatient']+ rawData['number_emergency']+ rawData['number_outpatient']
+#performs around the same
+#rawData['medical_burden'] = rawData['num_lab_procedures'] + rawData['num_procedures'] + rawData['num_medications'] + rawData['number_inpatient']+ rawData['number_emergency']
+rawData['medical_burden'] = np.log1p(rawData['num_lab_procedures']) + \
+                            np.log1p(rawData['num_procedures']) + \
+                            np.log1p(rawData['num_medications']) + \
+                            np.log1p(rawData['number_inpatient']) + \
+                            np.log1p(rawData['number_emergency'])
 
 #diag selection and replacing all missing values with 0
 columns_to_replace = ['diag_1', 'diag_2', 'diag_3']
@@ -99,6 +138,7 @@ rawData[columns_to_replace] = rawData[columns_to_replace].fillna(0)
 #### DATA IS DROPPED FROM (101766, 33) to (27140, 33) ####
 
 #some tuning to reduce overfitting for tensrflow model  MAYBE using insights from xgboost feature importance
+#test WITH some empty data?
 rawData.drop('medical_specialty', axis=1, inplace=True)
 rawData.drop('payer_code', axis=1, inplace=True)
 #rawData.drop('')
@@ -212,11 +252,25 @@ melted_data = pd.melt(filtered_data, id_vars=['readmitted_binary'], value_vars=d
 diag_readmission_frequency = melted_data.groupby('Code')['readmitted_binary'].sum().reset_index().sort_values(by='readmitted_binary', ascending=False)
 #WE NEED 3 BAR CHARTS - ONE FOR DIAG1 CONVERTED TO DISEASE NAME - THEN FOR 2 AND 3
 
+#https://raw.githubusercontent.com/drobbins/ICD9/master/icd9.txt
 categories = {
     'Certain infectious and parasitic diseases': range(1, 140),
     'Neoplasms': range(140, 240),
+    'Endocrine, nutritional and metabolic diseases': range(240, 250),
+    # #DIABETES TYPES
+    # 'Diabetes Mellitus': range(250, 250.1),
+    # 'Diabetes With ketoacidosis': range(250.1, 250.2),
+    # 'Diabetes With Hyperosmolarity': range(250.2, 250.3),
+    # 'Diabetes With Coma': range(250.3, 250.4),
+    # 'Diabetes With Renal Manifestations': range(250.4, 250.5),
+    # 'Diabetes With Opthalmic Manifestations': range(250.5, 250.6),
+    # 'Diabetes With Neurological Manifestations': range(250.6, 250.7),
+    # 'Diabetes With Peripheral Circulatory Manifestations': range(250.7, 250.8),
+    # 'Diabetes With Other Specified Manifestations': range(250.8, 250.9),
+    # 'Diabetes With Unspecified Complication': range(250.9, 251),
+    # #END OF DIABETES TYPES
+    'Endocrine, nutritional and metabolic diseases': range(251, 280),
     'Diseases of the blood and blood-forming organs': range(280, 290),
-    'Endocrine, nutritional and metabolic diseases': range(240, 280),
     'Mental and behavioural disorders': range(290, 320),
     'Diseases of the nervous system': range(320, 360),
     'Diseases of the eye and adnexa': range(360, 390),
@@ -256,6 +310,27 @@ v_code_categories = {
 def map_diag_to_category(diag_code):
     try:
         diag_code_float = float(diag_code) #in case of decimals
+        if(250<=diag_code_float<251):
+            if(250<=diag_code_float<250.1):
+                return 'Diabetes Mellitus Without Mention of Complication'
+            elif (250.1<=diag_code_float<250.2):
+                return 'Diabetes With ketoacidosis'
+            elif 250.2 <= diag_code_float < 250.3:
+                return 'Diabetes with hyperosmolarity'
+            elif 250.3 <= diag_code_float < 250.4:
+                return 'Diabetes with other coma'
+            elif 250.4 <= diag_code_float < 250.5:
+                return 'Diabetes with renal manifestations'
+            elif 250.5 <= diag_code_float < 250.6:
+                return 'Diabetes with ophthalmic manifestations'
+            elif 250.6 <= diag_code_float < 250.7:
+                return 'Diabetes with neurological manifestations'
+            elif 250.7 <= diag_code_float < 250.8:
+                return 'Diabetes with peripheral circulatory disorders'
+            elif 250.8 <= diag_code_float < 250.9:
+                return 'Diabetes with other specified manifestations'
+            elif 250.9 <= diag_code_float < 251:
+                return 'Diabetes with unspecified complication'
         diag_code_int = int(diag_code_float)
         for category, icd_range in categories.items():
             if diag_code_int in icd_range:
@@ -263,14 +338,12 @@ def map_diag_to_category(diag_code):
     except ValueError:
         if not diag_code.startswith('V'):
             return 'Other'
-        # Extract the numeric part of the V-code and convert to an integer for comparison
         try:
             code_num = int(diag_code[1:])
             for category, code_range in v_code_categories.items():
                 if code_num in code_range:
                     return category
         except ValueError:
-            # Handle case where the conversion fails (should not happen with correct V-codes)
             return 'Invalid V-code format'
     
     return 'Other Health Services Encounters'
@@ -329,12 +402,9 @@ print(filtered_data.dtypes)
 ##Could possibly weight it? So Diag1=1 + Diag2=1.5 + Diag3=1.75
 ##Even deeper. Use the weights of the categories themselves then normalise. 
 #filtered_data['total_severity'] = filtered_data[['diag_1', 'diag_2', 'diag_3']].applymap(lambda x: diag_severity.get(x, 0)).sum(axis=1)
-filtered_data['multiple_diagnoses'] = filtered_data[['diag_1', 'diag_2', 'diag_3']].notnull().sum(axis=1) > 1
-filtered_data['multiple_diagnoses'] = filtered_data['multiple_diagnoses'].astype(int)
-
-##More feature engineering: Count the number of medications a patient is on. This could indicate the severity of their diabetes management.
-medications = ['metformin', 'glimepiride', 'glipizide', 'glyburide', 'pioglitazone', 'rosiglitazone', 'insulin']
-filtered_data['diabetes_medication_count'] = filtered_data[medications].apply(lambda x: x != 'No').sum(axis=1)
+#filtered_data['multiple_diagnoses'] = filtered_data[['diag_1', 'diag_2', 'diag_3']].notnull().sum(axis=1) > 1
+#filtered_data['multiple_diagnoses'] = filtered_data['multiple_diagnoses'].astype(int)
+#Literally all 1 anyway
 
 #filtered_data['age_gender_interaction'] = filtered_data['age'] * filtered_data['gender']
 
@@ -515,20 +585,20 @@ X_train_scaled = scaler.fit_transform(X_train_smote)
 X_test_scaled = scaler.transform(X_test)
 
 model = tf.keras.models.Sequential([
-    tf.keras.layers.Dense(256, activation='relu', input_shape=(X_train_scaled.shape[1],), kernel_regularizer=l2(0.001)),
+    tf.keras.layers.Dense(512, activation='relu', input_shape=(X_train_scaled.shape[1],), kernel_regularizer=l2(0.001)),
     tf.keras.layers.Dropout(0.2),
     tf.keras.layers.Dense(256, activation='relu', kernel_regularizer=l2(0.001)),
     tf.keras.layers.BatchNormalization(),
     tf.keras.layers.Dropout(0.2),
     tf.keras.layers.Dense(128, activation='relu', kernel_regularizer=l2(0.001)),
-    tf.keras.layers.Dropout(0.2),
     tf.keras.layers.BatchNormalization(),
+    tf.keras.layers.Dropout(0.2),
     tf.keras.layers.Dense(32, activation='relu', kernel_regularizer=l2(0.001)),
-    tf.keras.layers.Dropout(0.2),
     tf.keras.layers.BatchNormalization(),
+    tf.keras.layers.Dropout(0.2),
     tf.keras.layers.Dense(16, activation='relu', kernel_regularizer=l2(0.001)),
-    tf.keras.layers.Dropout(0.2),
     tf.keras.layers.BatchNormalization(),
+    tf.keras.layers.Dropout(0.2),
     tf.keras.layers.Dense(8, activation='relu', kernel_regularizer=l2(0.001)),
     tf.keras.layers.Dropout(0.2),
     tf.keras.layers.BatchNormalization(),
